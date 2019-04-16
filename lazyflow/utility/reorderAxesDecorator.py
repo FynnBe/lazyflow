@@ -24,8 +24,15 @@ import types
 
 from lazyflow.operators.opReorderAxes import OpReorderAxes
 
+from typing import List, Optional
 
-def reorder_options(internal_axes_order, ignore_slots=[], output_axes_order="tczyx"):
+
+def reorder_options(
+    internal_axes_order,
+    slots: Optional[List[str]] = None,
+    ignore_slots: Optional[List[str]] = None,
+    output_axes_order="tczyx",
+):
     """
         Adds reorder options to the specific operator class that the decorator
         reorder accesses. This is not done by handing arguments to the reorder
@@ -41,29 +48,34 @@ def reorder_options(internal_axes_order, ignore_slots=[], output_axes_order="tcz
 
         @param internal_axes_order: str Axes order the decorated operator
                                         assumes internally.
-        @param ignore_slots: list(str) List of slot names that do not need to be
-                                       reordered.
+        @param slots: list(str) List of slot names that need to be reordered. (mutually exclusive with ignore_slots)
+        @param ignore_slots: list(str) List of slot names that do not need to be reordered. (mutually exclusive with slots)
         @param output_axes_order: str Output Axes order for all reordered
                                       output slots.
 
         Example usage: (for a 'real-life example check OpGraphCut in ilastik)
 
             @reorder
-            @reorder_options('tzyxc', ['ResizedShape'])
+            @reorder_options('tzyxc', ['InputImage'])
             class OpResize5D(Operator):
                 ...
 
     """
     assert isinstance(internal_axes_order, str)
-    assert isinstance(ignore_slots, list)
-    assert all([isinstance(ex, str) for ex in ignore_slots])
     assert isinstance(output_axes_order, str)
+    assert slots is None or ignore_slots is None, "mutually exclusive arguments"
 
     def set_options(cls):
-        assert all([ex in [s.name for s in cls.inputSlots + cls.outputSlots] for ex in ignore_slots])
         cls._internal_axes_order = internal_axes_order
-        cls._not_reordered_slots = ignore_slots
         cls._output_axes_order = output_axes_order
+        if slots is None:
+            if ignore_slots is None:
+                ignore_slots = []
+        else:
+            ignore_slots = [s.name for s in cls.inputSlots + cls.outputSlots if s.name not in slots]
+
+        assert all([ex in [s.name for s in cls.inputSlots + cls.outputSlots] for ex in ignore_slots])
+        cls._not_reordered_slots = ignore_slots
         return cls
 
     return set_options
