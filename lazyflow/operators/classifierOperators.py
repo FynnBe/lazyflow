@@ -150,7 +150,7 @@ class OpTrainPixelwiseClassifierBlocked(Operator):
 
     def setupOutputs(self):
         for slot in [self.Images, self.Labels]:
-            assert slot.meta.getAxisKeys()[-1] == "c", f"This opearator assumes channel is the last axis. problem: {slot}"
+            assert all([s.meta.getAxisKeys()[1] == "c" for s in slot]), f"This opearator assumes channel is the second axis. problem: {slot}"
 
         self.Classifier.meta.dtype = object
         self.Classifier.meta.shape = (1,)
@@ -434,7 +434,7 @@ class OpBaseClassifierPredict(Operator):
         self.PredictionMask.notifyUnready(lambda s: self.PMaps.setDirty())
 
     def setupOutputs(self):
-        assert self.Image.meta.getAxisKeys()[-1] == "c"
+        assert self.Image.meta.getAxisKeys()[1] == "c"
 
         nlabels = max(self.LabelsCount.value, 1)  # we'll have at least 2 labels once we actually predict something
         # not setting it to 0 here is friendlier to possible downstream
@@ -443,9 +443,9 @@ class OpBaseClassifierPredict(Operator):
 
         self.PMaps.meta.assignFrom(self.Image.meta)
         self.PMaps.meta.dtype = numpy.float32
-        self.PMaps.meta.shape = self.Image.meta.shape[:-1] + (
-            nlabels,
-        )  # FIXME: This assumes that channel is the last axis
+        pmap_shape = list(self.Image.meta.shape)
+        pmap_shape[1] = nlabels
+        self.PMaps.meta.shape = tuple(pmap_shape)
         self.PMaps.meta.drange = (0.0, 1.0)
 
     def execute(self, slot, subindex, roi, result):
@@ -461,14 +461,14 @@ class OpBaseClassifierPredict(Operator):
         if self.PredictionMask.ready():
             mask_roi = numpy.array((roi.start, roi.stop))
             num_channels_in_mask = self.PredictionMask.meta.getTaggedShape()["c"]
-            mask_roi[:, -1:] = [[0], [num_channels_in_mask]]
+            mask_roi[:, 1:] = [[0], [num_channels_in_mask]]
             start, stop = list(map(tuple, mask_roi))
             multichannel_mask = self.PredictionMask(start, stop).wait()
 
             # create a single-channel merged mask, which has 0 iff all PredictionMask channels are 0
-            mask = multichannel_mask[..., 0:1]
+            mask = multichannel_mask[:, 0:1]
             for c in range(1, num_channels_in_mask):
-                mask = numpy.logical_or(mask, multichannel_mask[..., c : c + 1])
+                mask = numpy.logical_or(mask, multichannel_mask[:, c : c + 1])
 
             if not numpy.any(mask):
                 logger.debug(f"Skipping masked block {roi}")
@@ -480,15 +480,15 @@ class OpBaseClassifierPredict(Operator):
         # We're expecting a channel for each label class.
         # If we didn't provide at least one sample for each label,
         #  we may get back fewer channels.
-        if probabilities.shape[-1] != self.PMaps.meta.shape[-1]:
+        if probabilities.shape[1] != self.PMaps.meta.shape[1]:
             # Copy to an array of the correct shape
             # This is slow, but it's an unusual case
-            assert probabilities.shape[-1] == len(classifier.known_classes)
-            full_probabilities = numpy.zeros(
-                probabilities.shape[:-1] + (self.PMaps.meta.shape[-1],), dtype=numpy.float32
-            )
+            assert probabilities.shape[1] == len(classifier.known_classes)
+            prob_shape = list(probabilities.shape)
+            prob_shape[1] = self.PMaps.meta.shape[1]
+            full_probabilities = numpy.zeros(prob_shape, dtype=numpy.float32)
             for i, label in enumerate(classifier.known_classes):
-                full_probabilities[..., label - 1] = probabilities[..., i]
+                full_probabilities[:, label - 1] = probabilities[:, i]
 
             probabilities = full_probabilities
 
@@ -497,7 +497,7 @@ class OpBaseClassifierPredict(Operator):
             probabilities *= mask
 
         # Copy only the prediction channels the client requested.
-        result[...] = probabilities[..., roi.start[-1] : roi.stop[-1]]
+        result[...] = probabilities[:, roi.start[1]:roi.stop[1]]
         return result
 
     @abstractmethod

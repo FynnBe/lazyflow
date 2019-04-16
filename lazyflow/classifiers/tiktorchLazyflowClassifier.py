@@ -75,11 +75,6 @@ class TikTorchLazyflowClassifierFactory(LazyflowOnlineClassifier):
         # Privates
         self._tikTorchClassifier = None
         self._train_model = None
-        self._opReorderAxesInImg = OpReorderAxes(graph=Graph())
-        self._opReorderAxesInLabel = OpReorderAxes(graph=Graph())
-        self._opReorderAxesInImg.AxisOrder.setValue("czyx")
-        self._opReorderAxesInLabel.AxisOrder.setValue("czyx")
-        self._opReorderAxesOut = OpReorderAxes(graph=Graph())
 
         addr, port1, port2 = (
             socket.gethostbyname(server_config["address"]),
@@ -89,7 +84,7 @@ class TikTorchLazyflowClassifierFactory(LazyflowOnlineClassifier):
         conn_conf = TCPConnConf(addr, port1, port2)
 
         if addr == "127.0.0.1":
-            self.launcher = LocalServerLauncher(conn_conf)
+            self.launcher = LocalServerLauncher(conn_conf, dummy=True)
         else:
             self.launcher = RemoteSSHServerLauncher(
                 conn_conf, cred=SSHCred(server_config["username"], server_config["password"])
@@ -237,29 +232,28 @@ class TikTorchLazyflowClassifierFactory(LazyflowOnlineClassifier):
         :param vigra.AxisTags axistags: axistags of feature_image
         :return: probabilities
         """
+        assert len(axistags) == 5, axistags  # assuming full tczyx
         assert isinstance(roi, numpy.ndarray)
         logger.info(f"tiktorchLazyflowClassifier.predict tile shape: {feature_image.shape}")
 
-        # translate roi axes todo: remove with tczyx standard
-        roi = roi[:, [axistags.index(a) for a in "czyx"]]
-
-        self._opReorderAxesIn.Input.setValue(vigra.VigraArray(feature_image, axistags=axistags))
-        reordered_feature_image = self._opReorderAxesIn.Output([]).wait()
+        self._opReorderAxesInImg.Input.setValue(vigra.VigraArray(feature_image, axistags=axistags))
+        reordered_feature_image = self._opReorderAxesInImg.Output([]).wait()
         assert reordered_feature_image.shape in self.valid_shapes, (reordered_feature_image.shape, self.valid_shapes)
+        # todo: do transforms in tiktorch
         transform = Compose(Normalize())
         reordered_feature_image = transform(reordered_feature_image)
 
-        result = self.tikTorchClient.forward(NDArrayBatch([NDArray(reordered_feature_image)])).as_numpy()[0]
+        result = self.tikTorchClient.forward(NDArray(reordered_feature_image)).result().as_numpy()
         logger.info(f"Obtained a predicted block of shape {result.shape}")
-        halo = numpy.array(self.get_halo("zyx"))
-        shrink = numpy.array(self.get_shrinkage("zyx"))
+        halo = numpy.array(self.get_halo("tczyx"))
+        shrink = numpy.array(self.get_shrinkage("tczyx"))
         # remove halo from result todo: do not send tensor with halo back, but remove halo in tiktorch instead
         assert len(result.shape) == len(halo), (result.shape, halo)
         result = result[[slice(h, -h) if h else slice(None) for h in halo]]
 
         # make two channels out of single channel predictions
-        if result.shape[0] == 1:
-            result = numpy.concatenate((result, 1 - result), axis=0)
+        if result.shape[1] == 1:
+            result = numpy.concatenate((result, 1 - result), axis=1)
             logger.info(f"Changed shape of predicted block to {result.shape} by adding '1-p' channel")
 
         # remove shrinkage and halo from roi
@@ -299,7 +293,7 @@ class TikTorchLazyflowClassifierFactory(LazyflowOnlineClassifier):
         halo_dims = {a: h for a, h in zip(in_order, halo)}
         self.halo = tuple([halo_dims.get(a, 0) for a in "tczyx"])
 
-    def get_halo(self, data_axes="zyx") -> Tuple[int, ...]:
+    def get_halo(self, data_axes: str = "zyx") -> Tuple[int, ...]:
         """
         :return: required halo for data axes
         """
@@ -310,10 +304,10 @@ class TikTorchLazyflowClassifierFactory(LazyflowOnlineClassifier):
 
         return tuple(halo)
 
-    def get_shrinkage(self, data_axes="zyx"):
+    def get_shrinkage(self, data_axes: str = "zyx") -> Tuple[int, ...]:
         assert all([a in "tczyx" for a in data_axes])
-        shrink = [self.shrinkage.get(a, 0) for a in "zyx"]
-        assert all([s % 2 == 0 for s in shrink])
+        shrink = [self.shrinkage["tczyx".index(a)] for a in data_axes]
+        assert all([s % 2 == 0 for s in shrink]), shrink
         return tuple(s // 2 for s in shrink)
 
     @property
@@ -321,8 +315,8 @@ class TikTorchLazyflowClassifierFactory(LazyflowOnlineClassifier):
         return self.input_channels - self.shrinkage[1]
 
     def get_valid_shapes(self, data_axes="zyx"):
-        assert all([a in data_axes for a in "czyx"])
-        return [tuple(vs[a] for a in data_axes) for vs in self.valid_shapes]
+        assert all([a in "tczyx" for a in data_axes])
+        return [tuple(vs["tczyx".index(a)] for a in data_axes) for vs in self.valid_shapes]
 
     def serialize_hdf5(self, h5py_group):
         pass  # nothing to serialize here

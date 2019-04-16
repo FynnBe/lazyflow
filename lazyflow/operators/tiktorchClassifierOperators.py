@@ -220,23 +220,27 @@ class OpTikTorchPixelwiseClassifierPredict(OpPixelwiseClassifierPredict):
             "".format(type(classifier))
         )
 
-        upstream_roi = (roi.start, roi.stop)
+        upstream_roi = (roi.start[:-1], roi.stop[:-1])  # upstream roi without
         axiskeys = self.Image.meta.getAxisKeys()
+        assert axiskeys[-1] == "c"
+        axiskeys = axiskeys[:-1]  # remove c
+        assert classifier.get_halo_shape("c")[0] == 0, "Didn't expect a non-zero halo for channel dimension."
+        assert classifier.get_shrinkage("c")[0] == 0, "Didn't expect a non-zero shrinkage for channel dimension."
         halo = numpy.array(classifier.get_halo_shape(axiskeys))
         shrinkage = numpy.array(classifier.get_shrinkage(axiskeys))
 
         assert len(halo) == len(upstream_roi[0])
-        assert axiskeys[-1] == "c"
-        assert halo[-1] == 0, "Didn't expect a non-zero halo for channel dimension."
 
         # Expand block by halo and shrinkage
         upstream_roi = numpy.array(upstream_roi)
+        # Ignore channel dimension
         upstream_roi[0] -= halo + shrinkage
         upstream_roi[1] += halo + shrinkage
 
         # Extend block further to reach a valid shape
         min_shape = upstream_roi[1] - upstream_roi[0]
-        for vs in classifier.get_valid_shapes(axiskeys):
+        for vs_with_channel in classifier.get_valid_shapes(axiskeys + ["c"]):
+            vs = vs_with_channel[:-1]
             if all(m <= v for m, v in zip(min_shape, vs)):
                 valid_shape = numpy.array(vs)
                 if any(m < v for m, v in zip(min_shape, vs)):
@@ -252,19 +256,22 @@ class OpTikTorchPixelwiseClassifierPredict(OpPixelwiseClassifierPredict):
             )
 
         # Determine how to extract the data from the result (without halo, shrinkage, and padding)
-        downstream_roi = numpy.array((roi.start, roi.stop))
+        downstream_roi = numpy.array((roi.start[:-1], roi.stop[:-1]))
         predictions_roi = downstream_roi - upstream_roi[0]
+        predictions_roi = numpy.concatenate((predictions_roi, [[roi.start[-1]], [roi.stop[-1]]]), axis=1)  # add channels
 
         # Limit upstream roi to self.Image.meta.shape and determine padding
         # todo: manage padding with tiktorch
         im_shape = self.Image.meta.shape
+        input_channels = im_shape[-1]
+        im_shape = im_shape[:-1]
         padding = [(max(0, -a0), max(0, a1 - s)) for a0, a1, s in zip(*upstream_roi, im_shape)]
         upstream_roi = numpy.array([[max(0, a0), min(a1, s)] for a0, a1, s in zip(*upstream_roi, im_shape)]).T
 
         # Request all upstream channels
-        input_channels = im_shape[-1]
-        upstream_roi[:, -1] = [0, input_channels]
-        padding[-1] = (0, 0)  # do not pad channels
+        assert input_channels == vs_with_channel[-1], (input_channels, vs_with_channel[-1])
+        upstream_roi = numpy.concatenate((upstream_roi, [[0], [input_channels]]), axis=1)
+        padding.append((0, 0))  # do not pad channels
 
         # Request the data
         input_data = self.Image(*upstream_roi).wait()
